@@ -26,7 +26,7 @@ a{color:#2563eb}#msg{text-align:center;color:#166534;min-height:20px;margin-top:
 <nav><button id="t1" class="on" onclick="tab(1)">Entry</button><button id="t2" onclick="tab(2)">View</button></nav>
 <main>
 <section id="s1" class="on">
- <div id="editbar" style="display:none;background:#fef3c7;padding:8px;border-radius:8px;margin-bottom:8px">Editing a record <button class="s" onclick="cancelEdit()">Cancel</button></div>
+ <div id="editbar" style="display:none;background:#fef3c7;padding:8px;border-radius:8px;margin-bottom:8px">Editing: <b id="editname"></b> <button class="s" onclick="cancelEdit()">Cancel</button></div>
  <label>Family name *</label><input id="fam">
  <label>Place name *</label><input id="place">
  <label>Location (paste Google Maps link)</label><input id="loc" inputmode="url">
@@ -36,7 +36,7 @@ a{color:#2563eb}#msg{text-align:center;color:#166534;min-height:20px;margin-top:
 </section>
 <section id="s2">
  <input id="q" type="search" placeholder="Search family or place name" oninput="render()">
- <div><button class="s" onclick="exportXlsx()">Export Excel</button><button class="s" onclick="$('imp').click()">Import Excel</button><button class="s" onclick="sync()">Sync to Google</button><button class="s" onclick="setUrl()">Set script URL</button></div>
+ <div><button class="s" onclick="exportXlsx()">Export Excel</button><button class="s" onclick="$('imp').click()">Import Excel</button><button class="s" onclick="loadRemote(true)">Load from Google</button><button class="s" onclick="sync()">Send to Google</button><button class="s" onclick="setUrl()">Set script URL</button><button class="s" onclick="testUrl()">Test connection</button></div>
  <input id="imp" type="file" accept=".xlsx" style="display:none" onchange="importXlsx(this)">
  <div id="count" style="margin:8px 0;font-size:14px;color:#555"></div><div id="list"></div>
 </section>
@@ -45,33 +45,37 @@ a{color:#2563eb}#msg{text-align:center;color:#166534;min-height:20px;margin-top:
 let db,data=[],editId=null;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function tab(n){[1,2].forEach(i=>{$('s'+i).classList.toggle('on',i==n);$('t'+i).classList.toggle('on',i==n)});if(n==2)load()}
+function tab(n){if(n==2&&editId)clearForm();[1,2].forEach(i=>{$('s'+i).classList.toggle('on',i==n);$('t'+i).classList.toggle('on',i==n)});if(n==2)load()}
 const op=indexedDB.open('famdb',1);
 op.onupgradeneeded=()=>op.result.createObjectStore('r',{keyPath:'id'});
-op.onsuccess=()=>{db=op.result;load()};
+op.onsuccess=()=>{db=op.result;load();auto()};
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
 const store=m=>db.transaction('r',m).objectStore('r');
 const load=()=>{store('readonly').getAll().onsuccess=e=>{data=e.target.result.sort((a,b)=>(b.date||'').localeCompare(a.date||''));render()}};
+const all=()=>new Promise(res=>store('readonly').getAll().onsuccess=e=>res(e.target.result));
+function upd(id,fn){return new Promise(res=>{const s=store('readwrite'),g=s.get(id);g.onsuccess=()=>{const r=g.result;if(r){fn(r);s.put(r)}};s.transaction.oncomplete=()=>res()})}
+function toggleSync(id){upd(id,x=>{x.synced=!x.synced;if(x.synced)x.pending=false}).then(load)}
 function resize(file){return new Promise(res=>{if(!file)return res('');const img=new Image();img.onload=()=>{const m=260,k=Math.min(1,m/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=img.width*k;c.height=img.height*k;c.getContext('2d').drawImage(img,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.6))};img.src=URL.createObjectURL(file)})}
 async function save(){
  const fam=$('fam').value.trim(),place=$('place').value.trim();
  if(!fam||!place){alert('Family name and place name are required');return}
- const old=editId&&data.find(x=>x.id==editId),np=await resize($('photo').files[0]);
- const r={id:old?old.id:Date.now()+'-'+Math.random().toString(36).slice(2,6),date:old?old.date:new Date().toISOString(),fam,place,loc:$('loc').value.trim(),ph:$('ph').value.trim(),photo:np||(old?old.photo:''),synced:false};
- store('readwrite').put(r).transaction.oncomplete=()=>{clearForm();$('msg').textContent='Saved ✓';setTimeout(()=>$('msg').textContent='',2000);load()}
+ const old=editId?data.find(x=>x.id==editId):null,np=await resize($('photo').files[0]);
+ const r={id:old?old.id:Date.now()+'-'+Math.random().toString(36).slice(2,6),date:old?old.date:new Date().toISOString(),fam,place,loc:$('loc').value.trim(),ph:$('ph').value.trim(),photo:np||(old?old.photo:''),synced:old?!!old.synced:false,pending:true,v:(old?old.v||0:0)+1};
+ store('readwrite').put(r).transaction.oncomplete=()=>{clearForm();$('msg').textContent='Saved ✓';setTimeout(()=>$('msg').textContent='',2000);load();autoSync(false)}
 }
 function clearForm(){['fam','place','loc','ph','photo'].forEach(i=>$(i).value='');editId=null;$('editbar').style.display='none';$('savebtn').textContent='Save'}
 function cancelEdit(){clearForm()}
-function edit(id){const r=data.find(x=>x.id==id);$('fam').value=r.fam;$('place').value=r.place;$('loc').value=r.loc||'';$('ph').value=r.ph||'';editId=id;$('editbar').style.display='block';$('savebtn').textContent='Update';tab(1);scrollTo(0,0)}
+function edit(id){const r=data.find(x=>x.id==id);$('fam').value=r.fam;$('place').value=r.place;$('loc').value=r.loc||'';$('ph').value=r.ph||'';editId=id;$('editname').textContent=r.fam;$('editbar').style.display='block';$('savebtn').textContent='Update';tab(1);scrollTo(0,0)}
 function render(){
  const q=$('q').value.toLowerCase().trim();
  const f=data.filter(r=>!q||r.fam.toLowerCase().includes(q)||r.place.toLowerCase().includes(q));
  $('count').textContent=f.length+' of '+data.length+' records';
- $('list').innerHTML=f.map(r=>`<div class="card">${r.photo?`<img src="${r.photo}">`:''}<div style="flex:1"><h3>${esc(r.fam)}</h3><p>📍 ${esc(r.place)}</p>${r.ph?`<p>📞 <a href="tel:${esc(r.ph)}">${esc(r.ph)}</a></p>`:''}${r.loc?`<p><a href="${esc(r.loc)}" target="_blank" rel="noopener">Open map</a></p>`:''}<span class="tag ${r.synced?'ok':''}">${r.synced?'synced':'not synced'}</span> <button class="s" onclick="edit('${r.id}')">Edit</button><button class="s" onclick="del('${r.id}')">Delete</button></div></div>`).join('')
+ $('list').innerHTML=f.map(r=>`<div class="card">${r.photo?`<img src="${r.photo}">`:''}<div style="flex:1"><h3>${esc(r.fam)}</h3><p>📍 ${esc(r.place)}</p>${r.ph?`<p>📞 <a href="tel:${esc(r.ph)}">${esc(r.ph)}</a></p>`:''}${r.loc?`<p><a href="${esc(r.loc)}" target="_blank" rel="noopener">Open map</a></p>`:''}<span class="tag ${r.synced?'ok':''}">${r.synced?'synced':'not synced'}${r.pending&&r.synced?' · update queued':''}</span> <button class="s" onclick="toggleSync('${r.id}')">${r.synced?'Unsync':'Mark synced'}</button><button class="s" onclick="edit('${r.id}')">Edit</button><button class="s" onclick="del('${r.id}')">Delete</button></div></div>`).join('')
 }
 function del(id){if(confirm('Delete this record?'))store('readwrite').delete(id).transaction.oncomplete=load}
 
 /* ---- minimal .xlsx writer/reader (no libraries, works offline) ---- */
-const HDR=['ID','Date','Family name','Place name','Location','Phone','Photo'];
+const HDR=['ID','Date','Family name','Place name','Location','Phone','Photo','Synced'];
 const CT=(()=>{let t=[],c;for(let n=0;n<256;n++){c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
 const crc=u=>{let c=-1;for(let i=0;i<u.length;i++)c=CT[(c^u[i])&255]^(c>>>8);return(c^-1)>>>0};
 const pk=s=>{const b=new Uint8Array(s.reduce((a,x)=>a+x[0],0)),v=new DataView(b.buffer);let o=0;for(const[n,x]of s){n==4?v.setUint32(o,x,true):v.setUint16(o,x,true);o+=n}return b};
@@ -85,8 +89,8 @@ function zip(files){const enc=new TextEncoder,parts=[],cen=[];let off=0;
  return new Blob([...parts,...cen,pk([[4,0x06054b50],[2,0],[2,0],[2,files.length],[2,files.length],[4,cs],[4,off],[2,0]])],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})}
 const xe=s=>String(s==null?'':s).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function exportXlsx(){
- const rows=[HDR].concat(data.map(r=>[r.id,r.date,r.fam,r.place,r.loc,r.ph,r.photo]));
- const sheet='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'+rows.map((r,i)=>`<row r="${i+1}">`+r.map((v,j)=>`<c r="${'ABCDEFG'[j]}${i+1}" t="inlineStr"><is><t xml:space="preserve">${xe(v)}</t></is></c>`).join('')+'</row>').join('')+'</sheetData></worksheet>';
+ const rows=[HDR].concat(data.map(r=>[r.id,r.date,r.fam,r.place,r.loc,r.ph,r.photo,r.synced?'Yes':'No']));
+ const sheet='<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'+rows.map((r,i)=>`<row r="${i+1}">`+r.map((v,j)=>`<c r="${'ABCDEFGH'[j]}${i+1}" t="inlineStr"><is><t xml:space="preserve">${xe(v)}</t></is></c>`).join('')+'</row>').join('')+'</sheetData></worksheet>';
  const R='http://schemas.openxmlformats.org/officeDocument/2006/relationships',M='http://schemas.openxmlformats.org/spreadsheetml/2006/main',H='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
  const b=zip([
   ['[Content_Types].xml',H+'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'],
@@ -118,24 +122,48 @@ async function importXlsx(inp){
   for(const r of rows.slice(1)){
    const g=n=>ix(n)<0?'':String(r[ix(n)]==null?'':r[ix(n)]).trim();
    if(!g('Family name')&&!g('Place name'))continue;
-   const id=g('ID')||Date.now()+'-'+Math.random().toString(36).slice(2,8),old=data.find(x=>x.id==id);
-   tx.put({id,date:g('Date')||new Date().toISOString(),fam:g('Family name'),place:g('Place name'),loc:g('Location'),ph:g('Phone'),photo:g('Photo').startsWith('data:image')?g('Photo'):'',synced:false});
+   const id=g('ID')||Date.now()+'-'+Math.random().toString(36).slice(2,8),old=data.find(x=>x.id==id),sy=ix('Synced')<0?!!(old&&old.synced):/^(yes|true|1)$/i.test(g('Synced'));
+   tx.put({id,date:g('Date')||new Date().toISOString(),fam:g('Family name'),place:g('Place name'),loc:g('Location'),ph:g('Phone'),photo:g('Photo').startsWith('data:image')?g('Photo'):(old?old.photo:''),synced:sy,pending:!sy,v:(old?old.v||0:0)+1});
    old?upd++:add++}
   tx.transaction.oncomplete=()=>{alert(add+' added, '+upd+' updated');load()}
  }catch(e){alert('Could not read this file. Use an .xlsx file (Excel format).')}
 }
 
-function setUrl(){const u=prompt('Paste your Apps Script Web App URL',localStorage.url||'');if(u!==null)localStorage.url=u.trim()}
+function setUrl(){const u=prompt('Paste your Apps Script Web App URL (ends with /exec)',localStorage.url||'');if(u===null)return;localStorage.url=u.trim();if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(u.trim()))alert('This does not look like a Web App URL. It should start with https://script.google.com/macros/s/ and end with /exec')}
+async function testUrl(){if(!localStorage.url)return setUrl();try{const t=await(await fetch(localStorage.url)).text();alert(/running/.test(t)?'Connected ✓ script is running':'Reached Google but not your script:\n'+t.replace(/<[^>]*>/g,' ').slice(0,150)+HINT)}catch(e){alert('Cannot reach the script ('+e.message+').'+HINT)}}
+let sending=false,lastErr='';
+const HINT='\n\nCheck: URL must end with /exec, access must be "Anyone", and redeploy as a New version after pasting code.';
+async function autoSync(manual){
+ if(sending||!db||!localStorage.url||!navigator.onLine)return -1;
+ sending=true;lastErr='';let n=0,tot=0;
+ try{const list=(await all()).filter(x=>manual?(x.pending||!x.synced):x.pending);tot=list.length;
+  for(const r of list){try{const res=await fetch(localStorage.url,{method:'POST',body:JSON.stringify(r)}),t=await res.text();if(!/^(added|updated|ok|duplicate)/.test(t))throw new Error(t.replace(/<[^>]*>/g,' ').slice(0,150));await upd(r.id,x=>{x.synced=true;if((x.v||0)==(r.v||0))x.pending=false});n++}catch(e){lastErr=String(e.message||e);break}}
+ }finally{sending=false}
+ load();return manual?[n,tot]:n
+}
+const auto=()=>autoSync(false).then(()=>loadRemote(false));
+async function loadRemote(manual){
+ if(!localStorage.url){if(manual)setUrl();return}
+ if(!navigator.onLine){if(manual)alert('You are offline.');return}
+ try{
+  const res=await fetch(localStorage.url+'?action=list'),t=await res.text();let rem;
+  try{rem=JSON.parse(t)}catch(e){throw new Error(t.replace(/<[^>]*>/g,' ').slice(0,150))}
+  if(!Array.isArray(rem))throw new Error(rem.error||'Unexpected reply');
+  const loc=await all(),m={};loc.forEach(x=>m[x.id]=x);let add=0,upd2=0;const tx=store('readwrite');
+  for(const x of rem){
+   const l=m[x.id];if(!x.id||(!x.fam&&!x.place)||(l&&(l.pending||!l.synced)))continue;
+   tx.put({id:x.id,date:x.date||(l?l.date:new Date().toISOString()),fam:x.fam,place:x.place,loc:x.loc,ph:x.ph,photo:x.photo||(l?l.photo:''),synced:true,pending:false,v:(l?l.v||0:0)+1});
+   l?upd2++:add++}
+  await new Promise(r=>tx.transaction.oncomplete=r);load();
+  if(manual)alert(add+' new, '+upd2+' refreshed from Google ('+rem.length+' in Sheet)')
+ }catch(e){if(manual)alert('Could not load: '+(e.message||e)+HINT)}
+}
 async function sync(){
  if(!localStorage.url)return setUrl();
  if(!navigator.onLine)return alert('You are offline. Try again when online.');
- const pending=data.filter(r=>!r.synced);let n=0;
- for(const r of pending){
-  try{await fetch(localStorage.url,{method:'POST',mode:'no-cors',body:JSON.stringify(r)});r.synced=true;store('readwrite').put(r);n++}catch(e){break}
- }
- alert(n+' of '+pending.length+' records sent');load()
+ const r=await autoSync(true);if(r&&r!=-1)alert(r[0]+' of '+r[1]+' records sent'+(lastErr?'\n\nProblem: '+lastErr+HINT:''))
 }
 const net=()=>$('net').textContent=navigator.onLine?'online':'offline';
-addEventListener('online',net);addEventListener('offline',net);net();
+addEventListener('online',()=>{net();auto()});addEventListener('offline',net);net();
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
 </script></body></html>
